@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Ad-hoc checker for kesto.bfs.solve on a single puzzle.
+"""Ad-hoc checker for kesto.bfs.solve / kesto.astar.solve on a single puzzle.
 
 Usage:
     python check_bfs.py '<base64url>.<moves>'   # an encoded puzzle from the site
     python check_bfs.py 20260608                # a bundled puzzle, by slug
     python check_bfs.py board.txt               # a transcribed 8x8 grid
     python check_bfs.py 20260608 --cap 2000000  # smaller cap for a quick probe
+    python check_bfs.py 20260608 --solver astar # A* instead of BFS
 
 The published solution suffix is optional. Without it you still get the "does
 this path actually reach the goals" check, just not the optimality comparison.
@@ -22,9 +23,12 @@ import argparse
 import os
 import time
 
+from kesto import astar, bfs
 from kesto.board import N, Puzzle, parse, render
-from kesto.bfs import solve
 from kesto.puzzles import by_slug
+
+# Both take (puzzle, max_states=...) and return a kesto.bfs.Result.
+SOLVERS = {"bfs": bfs.solve, "astar": astar.solve}
 
 # Which bitboards each grid character contributes to.
 _CHARS = {
@@ -67,17 +71,20 @@ def main() -> int:
     ap.add_argument("puzzle", help="encoded puzzle string, or a bundled slug")
     ap.add_argument("--cap", type=int, default=20_000_000, help="max_states")
     ap.add_argument("--quiet", action="store_true", help="skip the board render")
+    ap.add_argument(
+        "--solver", choices=sorted(SOLVERS), default="bfs", help="search to run"
+    )
     args = ap.parse_args()
 
     p = load_puzzle(args.puzzle)
     if not args.quiet:
         print(render(p.blocks, p.walls, p.goals))
-    print(f"blocks={p.n_blocks} walls={p.n_walls} cap={args.cap:,}")
+    print(f"solver={args.solver} blocks={p.n_blocks} walls={p.n_walls} cap={args.cap:,}")
     if p.solution:
         print(f"published: {p.solution} ({len(p.solution)} moves)")
 
     t0 = time.perf_counter()
-    r = solve(p, max_states=args.cap)
+    r = SOLVERS[args.solver](p, max_states=args.cap)
     dt = time.perf_counter() - t0
     print(f"\nsearched {r.states:,} states in {dt:.2f}s  exhausted={r.exhausted}")
 
@@ -104,7 +111,8 @@ def main() -> int:
 
         # 2. Is it optimal? The published solutions are known optimal, so a
         #    shorter result means the engine or the search is cheating, and a
-        #    longer one means BFS is not returning a shortest path.
+        #    longer one means the search is not returning a shortest path (for
+        #    A*, usually an inadmissible heuristic).
         if p.solution:
             d = r.length - len(p.solution)
             if d == 0:
