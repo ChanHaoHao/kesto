@@ -34,10 +34,11 @@ against the bundled optimal paths before trusting it.
 
 from __future__ import annotations
 
+import heapq
 from collections.abc import Callable
 
 from .bfs import Result
-from .board import Puzzle
+from .board import MOVES, Puzzle, cells, move
 
 __all__ = ["axis_bound", "heuristic", "solve"]
 
@@ -71,7 +72,24 @@ def axis_bound(block_coords: list[int], goal_coords: list[int], increasing: bool
         - Only draw a bound when ``need > 0`` and enough candidate blocks exist
           to supply it; the relevant candidate is the ``need``-th one.
     """
-    raise NotImplementedError
+
+    best = 0
+    for t in range(1, 8):
+        if increasing:
+            b = sum(1 for v in block_coords if v >= t)
+            g = sum(1 for v in goal_coords if v >= t)
+            need = g - b
+            candidates = sorted((v for v in block_coords if v < t), reverse=True)
+            if need > 0 and len(candidates) >= need:
+                best = max(best, t - candidates[need - 1])
+        else:
+            b = sum(1 for v in block_coords if v <= t - 1)
+            g = sum(1 for v in goal_coords if v <= t - 1)
+            need = g - b
+            candidates = sorted(v for v in block_coords if v > t - 1)
+            if need > 0 and len(candidates) >= need:
+                best = max(best, candidates[need - 1] - (t - 1))
+    return best
 
 
 def heuristic(blocks: int, goals: int) -> int:
@@ -92,7 +110,22 @@ def heuristic(blocks: int, goals: int) -> int:
 
     Use :func:`kesto.board.cells` to expand the bitboards into ``(x, y)`` pairs.
     """
-    raise NotImplementedError
+
+    if blocks == goals:
+        return 0
+
+    block_cells, goal_cells = cells(blocks), cells(goals)
+    bx = [x for x, _ in block_cells]
+    gx = [x for x, _ in goal_cells]
+    by = [y for _, y in block_cells]
+    gy = [y for _, y in goal_cells]
+
+    return (
+        axis_bound(bx, gx, True)
+        + axis_bound(bx, gx, False)
+        + axis_bound(by, gy, True)
+        + axis_bound(by, gy, False)
+    )
 
 
 def solve(
@@ -127,4 +160,37 @@ def solve(
           ``kesto.board.MOVES``; note a swipe may be a no-op, which naturally
           dedupes against the visited map.
     """
-    raise NotImplementedError
+
+    h = heuristic if h is None else h
+    start, goals = puzzle.blocks, puzzle.goals
+
+    # Best g reached so far per state; doubles as the visited set. `parent`
+    # carries the move that produced each state, for reconstruction.
+    dist = {start: 0}
+    parent: dict[int, tuple[int, str] | None] = {start: None}
+    pq = [(h(start, goals), 0, start)]
+
+    while pq:
+        _, neg_g, state = heapq.heappop(pq)
+        g = -neg_g
+        if g > dist[state]:
+            continue  # stale entry left behind by a re-open
+
+        if state == goals:
+            path = []
+            while parent[state] is not None:
+                state, m = parent[state]
+                path.append(m)
+            return Result("".join(reversed(path)), len(dist), False)
+
+        for m in MOVES:
+            nxt = move(state, puzzle.walls, m)
+            if nxt not in dist or g + 1 < dist[nxt]:
+                dist[nxt] = g + 1
+                parent[nxt] = (state, m)
+                heapq.heappush(pq, (g + 1 + h(nxt, goals), -(g + 1), nxt))
+
+        if len(dist) > max_states:
+            return Result(None, len(dist), False)
+
+    return Result(None, len(dist), True)
