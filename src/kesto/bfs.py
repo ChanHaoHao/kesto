@@ -19,9 +19,10 @@ on the remaining puzzles.
 
 from __future__ import annotations
 
+import collections
 from typing import NamedTuple
 
-from .board import Puzzle
+from .board import MOVES, Puzzle, move
 
 __all__ = ["Result", "solve", "reachable"]
 
@@ -76,7 +77,30 @@ def solve(puzzle: Puzzle, max_states: int = 20_000_000) -> Result:
         - Reconstruct by walking parent links back from the goal, collecting the
           moves, then reversing.
     """
-    raise NotImplementedError
+
+    start = puzzle.blocks
+    q = collections.deque([start])
+    visited = {start: None}
+
+    while q:
+        state = q.popleft()
+        if state == puzzle.goals:
+            # backtrack to reconstruct the path
+            path = []
+            while visited[state] is not None:
+                state, m = visited[state]
+                path.append(m)
+            return Result("".join(reversed(path)), len(visited), False)
+        for m in MOVES:
+            next_state = move(state, puzzle.walls, m)
+            if next_state not in visited:
+                visited[next_state] = (state, m)
+                q.append(next_state)
+
+        if len(visited) > max_states:
+            break
+
+    return Result(None, len(visited), True)
 
 
 def reachable(puzzle: Puzzle, max_states: int = 20_000_000) -> int:
@@ -98,4 +122,20 @@ def reachable(puzzle: Puzzle, max_states: int = 20_000_000) -> int:
     Implementation note: the same traversal as :func:`solve` with the goal test
     removed and no need for parent links -- a plain ``set`` suffices.
     """
-    raise NotImplementedError
+    
+    start = puzzle.blocks
+    q = collections.deque([start])
+    visited = {start}
+
+    while q:
+        state = q.popleft()
+        for m in MOVES:
+            next_state = move(state, puzzle.walls, m)
+            if next_state not in visited:
+                visited.add(next_state)
+                q.append(next_state)
+
+        if len(visited) > max_states:
+            break
+
+    return len(visited)
