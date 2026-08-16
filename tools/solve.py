@@ -17,19 +17,12 @@ since that is the cheaper ply to expand. Boards differ wildly in which direction
 is cheap: some have tiny backward branching and huge forward branching, some the
 reverse, so committing to one direction in advance is what makes a board look
 unsolvable when it merely needed the other end.
-
-Levels are checkpointed under --dir, so a re-run resumes rather than restarts,
-and reconstruction streams them back one ply at a time.
 """
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
 import os
-import resource
 import sys
-import time
 
 import numpy as np
 
@@ -38,18 +31,20 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, HERE)
 
-from meet import cap_memory, expand, intersect_sorted, mask_not_in, merge_sorted
+from meet import (
+    cap_memory,
+    check_counts,
+    clear_levels,
+    expand,
+    intersect_sorted,
+    log,
+    mask_not_in,
+    merge_sorted,
+)
 from probe import U64, vmove
 from vpred import predecessors
 
 from solver import load_puzzle
-
-t0 = time.perf_counter()
-
-
-def log(msg):
-    print(f"[{time.perf_counter() - t0:7.1f}s] {msg}", flush=True)
-
 
 def default_mem_gb():
     """Most of currently-available RAM, leaving the rest of the machine alone."""
@@ -68,59 +63,23 @@ def contains(sorted_arr, values):
     return ~mask_not_in(values, sorted_arr)
 
 
-def puzzle_id(p):
-    """Short digest of the board itself -- walls included, not just the name."""
-    raw = f"{p.walls}:{p.blocks}:{p.goals}".encode()
-    return hashlib.sha1(raw).hexdigest()[:8]
-
-
-def claim_dir(out_dir, p, explicit):
-    """Bind a checkpoint directory to one board, refusing a mismatched reuse.
-
-    Levels are only meaningful for the board that produced them. Editing a
-    board file while old levels sit under the same name silently resumes the
-    wrong search -- which surfaced here as a bogus meet and a reconstruction
-    that could not find its own parent.
-    """
-    os.makedirs(out_dir, exist_ok=True)
-    manifest = os.path.join(out_dir, "puzzle.json")
-    want = {"walls": p.walls, "blocks": p.blocks, "goals": p.goals}
-
-    if os.path.exists(manifest):
-        with open(manifest) as fh:
-            got = json.load(fh)
-        if got != want:
-            raise SystemExit(
-                f"checkpoint mismatch in {out_dir}\n"
-                f"  those levels belong to a different board.\n"
-                f"  delete the directory, or pass a different --dir."
-            )
+def discard_levels(out_dir):
+    """Delete this run's levels."""
+    try:
+        freed, leftover = clear_levels(out_dir)
+        if not leftover:
+            os.rmdir(out_dir)
+    except OSError as e:
+        log(f"could not clear {out_dir}: {e}")
         return
-
-    stale = [f for f in os.listdir(out_dir) if f.endswith(".npy")]
-    if stale:
-        # Pre-manifest directory: verify what can be verified before trusting it.
-        f0, b0 = os.path.join(out_dir, "fwd_000.npy"), os.path.join(out_dir, "back_000.npy")
-        ok = os.path.exists(f0) and os.path.exists(b0)
-        if ok:
-            ok = int(np.load(f0)[0]) == p.blocks and int(np.load(b0)[0]) == p.goals
-        if not ok:
-            raise SystemExit(
-                f"checkpoint mismatch in {out_dir}\n"
-                f"  those levels belong to a different board.\n"
-                f"  delete the directory, or pass a different --dir."
-            )
-        log(f"adopting existing levels in {out_dir} (walls unverifiable, pre-manifest)")
-        if explicit:
-            log("  if that board's walls differ, delete the directory and re-run")
-
-    with open(manifest, "w") as fh:
-        json.dump(want, fh)
+    log(
+        f"levels discarded ({freed / 1024**3:.2f} GiB freed)"
+        + (f"; {len(leftover)} foreign file(s) left in place" if leftover else "")
+    )
 
 
 class Side:
-    """One end of the search: exact BFS shells, checkpointed to disk."""
-
+    """One end of the search: exact BFS shells."""
     def __init__(self, name, seed, step, out_dir):
         self.name, self.step, self.dir = name, step, out_dir
         os.makedirs(out_dir, exist_ok=True)
@@ -129,35 +88,29 @@ class Side:
         self.seen = self.frontier.copy()
         self.exhausted = False
         self._sizes = {}
-        if not os.path.exists(self.path(0)):
-            np.save(self.path(0), self.frontier)
-        self._resume()
+        self._save(0, self.frontier)
 
     def path(self, d):
         return os.path.join(self.dir, f"{self.name}_{d:03d}.npy")
 
-    def _resume(self):
-        # Only the frontier is loaded here. `seen` costs gigabytes on a deep
-        # board and is needed solely to extend, which a resumed run often never
-        # does -- so it is rebuilt lazily on the first extend() instead.
-        while os.path.exists(self.path(self.depth + 1)):
-            self.depth += 1
-        if self.depth:
-            self.frontier = np.load(self.path(self.depth))
-            self.seen = None
-            log(f"{self.name}: resumed at ply {self.depth}")
+    def _save(self, d, layer):
+        """Write a ply, stopping the run if the scratch directory vanished.
 
-    def _load_seen(self):
-        if self.seen is not None:
-            return
-        self.seen = np.load(self.path(0))
-        for d in range(1, self.depth + 1):
-            self.seen = merge_sorted(self.seen, np.load(self.path(d)))
-        log(f"{self.name}: seen rebuilt ({self.seen.size:,} states)")
+        Recreating it would be worse than failing: the earlier plies are gone
+        with it, so reconstruction could not walk back to the start, and the
+        search would carry on and report a length it can no longer justify.
+        """
+        if not os.path.isdir(self.dir):
+            raise SystemExit(
+                f"{self.dir} disappeared mid-run.\n"
+                f"  The plies written so far went with it, so no path could be\n"
+                f"  reconstructed. Nothing else should touch this directory while\n"
+                f"  a solve is running -- check for a second solve.py on this board."
+            )
+        np.save(self.path(d), layer)
 
     def extend(self):
         """Build the next ply. False if the space is exhausted."""
-        self._load_seen()
         nxt = self.step(self.frontier, self.seen)
         layer = nxt[mask_not_in(nxt, self.seen)]
         del nxt
@@ -168,7 +121,7 @@ class Side:
         self.depth += 1
         self.frontier = layer
         self.seen = merge_sorted(self.seen, layer)
-        np.save(self.path(self.depth), layer)
+        self._save(self.depth, layer)
         log(f"{self.name} ply {self.depth:3d}: +{layer.size:,} -> {self.seen.size:,}")
         return True
 
@@ -220,27 +173,8 @@ def descend(state, db, back, walls):
     return "".join(moves)
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("puzzle", help="grid file, bundled slug, or encoded string")
-    ap.add_argument("--mem-gb", type=float, default=None, help="RLIMIT_AS ceiling")
-    ap.add_argument("--dir", default=None, help="checkpoint directory")
-    ap.add_argument("--max-len", type=int, default=200, help="give up beyond this length")
-    args = ap.parse_args()
-
-    mem = args.mem_gb if args.mem_gb is not None else default_mem_gb()
-    cap_memory(mem)
-
-    p = load_puzzle(args.puzzle)
-    if p.n_blocks != bin(p.goals).count("1"):
-        print(f"unsolvable: {p.n_blocks} blocks but {bin(p.goals).count('1')} goals")
-        return 1
-
-    # Default directory carries the board digest, so editing a board file
-    # lands in a fresh directory instead of resuming someone else's levels.
-    tag = os.path.splitext(os.path.basename(args.puzzle))[0]
-    out_dir = args.dir or os.path.join(ROOT, "work", f"{tag}-{puzzle_id(p)}")
-    claim_dir(out_dir, p, explicit=args.dir is not None)
+def search(p, out_dir, args):
+    """Run the bidirectional search. Returns the process exit code."""
     walls, popcnt = np.uint64(p.walls), p.n_blocks
 
     if p.blocks == p.goals:
@@ -262,19 +196,12 @@ def main():
             )
             (fwd if grow_fwd else back).extend()
 
-        # Any one split decides L. Every shorter length has already been ruled
-        # out, so if a length-L path exists it is optimal, and its state at
-        # forward distance df must sit at backward distance exactly L - df --
-        # otherwise the two halves would splice into something shorter. Since
-        # every valid split is equally conclusive, take the cheapest: the cost
-        # is driven by the smaller side, and shallow plies are millions of times
-        # smaller than deep ones.
         best = None
         for df in range(max(0, L - back.depth), min(fwd.depth, L) + 1):
             sf, sb = fwd.size(df), back.size(L - df)
             if sf is None or sb is None:
                 continue
-            cost = min(sf, sb)
+            cost = sf + sb
             if best is None or cost < best[0]:
                 best = (cost, df)
         if best is not None:
@@ -298,6 +225,40 @@ def main():
 
     print(f"\nno solution up to {args.max_len} moves")
     return 2
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("puzzle", help="grid file, bundled slug, or encoded string")
+    ap.add_argument("--mem-gb", type=float, default=None, help="RLIMIT_AS ceiling")
+    ap.add_argument("--dir", default=None, help="checkpoint directory")
+    ap.add_argument("--max-len", type=int, default=200, help="give up beyond this length")
+    args = ap.parse_args()
+
+    mem = args.mem_gb if args.mem_gb is not None else default_mem_gb()
+    cap_memory(mem)
+
+    p = load_puzzle(args.puzzle)
+    check_counts(p)
+
+    # One fixed directory per board name, holding this run's scratch only.
+    # Every run is a new board: anything already in there is a previous search's
+    # leftovers, never resumed, so it goes before this one starts.
+    tag = os.path.splitext(os.path.basename(args.puzzle))[0]
+    out_dir = args.dir or os.path.join(ROOT, "work", tag)
+    os.makedirs(out_dir, exist_ok=True)
+    clear_levels(out_dir)
+
+    # And it goes again on the way out, however that happens -- solved,
+    # unsolvable, gave up, crashed, Ctrl-C. Nothing is kept for a later run
+    # because no later run would read it.
+    try:
+        return search(p, out_dir, args)
+    except KeyboardInterrupt:
+        print("\ninterrupted")
+        return 130
+    finally:
+        discard_levels(out_dir)
 
 
 if __name__ == "__main__":

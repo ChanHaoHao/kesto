@@ -1,21 +1,11 @@
-"""Bidirectional search: does board.txt's start meet its goal's backward basin?
-
-Backward branching (~3.1x) is worse than forward (~2.3x), so the budget is spent
-asymmetrically: a shallow backward basin B, then a deep forward sweep that
-intersects each new level against B. A hit at forward depth df on a state whose
-backward depth is db proves a solution of length df + db, which is then replayed
-through the forward engine to confirm.
-
-No hit is not a proof of unsolvability -- it only rules out solutions up to the
-combined depth reached.
-"""
+"""Bidirectional search: does board.txt's start meet its goal's backward basin?"""
 from __future__ import annotations
 
 import argparse
+import json
 import os
-import resource
+import re
 import sys
-import time
 
 import numpy as np
 
@@ -23,40 +13,79 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)  # the Kesto repo, for `import kesto` and solver.py
 sys.path.insert(0, ROOT)
 sys.path.insert(0, HERE)
-sys.path.insert(0, HERE)
 
-from probe import U64, vmove
+from probe import U64, cap_memory, log, rss_gb, vmove
 from vpred import predecessors
 
 from solver import load_puzzle
 
-t0 = time.perf_counter()
+
+def check_counts(p):
+    """Reject a board whose block and goal counts differ."""
+    goals = p.goals.bit_count()
+    if p.n_blocks != goals:
+        raise SystemExit(f"unsolvable: {p.n_blocks} blocks but {goals} goals")
 
 
-def log(msg):
-    print(f"[{time.perf_counter() - t0:7.1f}s] {msg}", flush=True)
+LEVEL_FILES = re.compile(r"(?:fwd|back)_\d{3}\.npy|puzzle\.json")
 
 
-def cap_memory(gb):
-    """Hard address-space ceiling.
+def clear_levels(out_dir):
+    """Remove the levels and manifest from a directory, leaving anything else."""
+    try:
+        names = os.listdir(out_dir)
+    except OSError:
+        return 0, []
+    freed = 0
+    for n in names:
+        if LEVEL_FILES.fullmatch(n):
+            f = os.path.join(out_dir, n)
+            freed += os.path.getsize(f)
+            os.remove(f)
+    return freed, os.listdir(out_dir)
 
-    Without this a bad size estimate lets the kernel OOM-killer pick a victim
-    globally -- which is how an earlier run took the whole session down. With
-    it, overshooting raises MemoryError inside this process and nothing else on
-    the machine is touched.
-    """
-    limit = int(gb * 1024**3)
-    resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
-    log(f"address space capped at {gb:.1f} GiB")
+
+def claim_dir(out_dir, p, explicit):
+    """Bind a checkpoint directory to one board, refusing a mismatched reuse."""
+    os.makedirs(out_dir, exist_ok=True)
+    manifest = os.path.join(out_dir, "puzzle.json")
+    want = {"walls": p.walls, "blocks": p.blocks, "goals": p.goals}
+    ok = True
+
+    if os.path.exists(manifest):
+        with open(manifest) as fh:
+            got = json.load(fh)
+        if got == want:
+            return
+        ok = False
+    elif any(f.endswith(".npy") for f in os.listdir(out_dir)):
+        ok = False
+        for kind, seed in (("fwd", p.blocks), ("back", p.goals)):
+            f = os.path.join(out_dir, f"{kind}_000.npy")
+            if not os.path.exists(f):
+                continue
+            if int(np.load(f)[0]) != seed:
+                ok = False
+                break
+            ok = True
+        if ok:
+            log(f"adopting existing levels in {out_dir} (walls unverifiable, pre-manifest)")
+            if explicit:
+                log("  if that board's walls differ, delete the directory and re-run")
+
+    if not ok:
+        raise SystemExit(
+            f"checkpoint mismatch in {out_dir}\n"
+            f"  those levels belong to a different board.\n"
+            f"  delete the directory, or pass a different --dir."
+        )
+
+    with open(manifest, "w") as fh:
+        json.dump(want, fh)
 
 
 def expand(layer, walls):
-    """All successors of a layer, sorted and deduplicated, allocating once.
-
-    np.unique would concatenate into one buffer and sort into another; filling
-    a preallocated block and sorting it in place halves peak memory, which is
-    what decides whether the deep plies survive.
-    """
+    """All successors of a layer, sorted and deduplicated, allocating once."""
     n = layer.size
     out = np.empty(n * 4, U64)
     for i, m in enumerate("UDLR"):
@@ -72,12 +101,7 @@ CHUNK_ROWS = 8 << 20
 
 
 def mask_not_in(cand, seen):
-    """Boolean mask of `cand` entries absent from sorted `seen`.
-
-    np.isin argsorts the concatenation of both inputs, which at ply 18 means a
-    2.2 GiB int64 index array. Both sides are already sorted here, so a chunked
-    searchsorted answers the same question with bounded temporaries.
-    """
+    """Boolean mask of `cand` entries absent from sorted `seen`."""
     out = np.empty(cand.size, bool)
     if seen.size == 0:
         out[:] = True
@@ -136,20 +160,14 @@ def backward_basin(p, walls, popcnt, max_depth, cap):
     return seen, depth_of, False
 
 
-def rss_gb():
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024**2
-
-
 def forward_meet(p, walls, basin, bdepth, max_depth, cap, levels=None, ckpt=None):
-    """BFS from the start, intersecting each new level against the basin.
-
-    Pass `levels` (an empty list) to retain each ply for reconstruction; that
-    roughly doubles peak memory, so it is off by default.
-    """
+    """BFS from the start, intersecting each new level against the basin."""
     seen = np.array([p.blocks], U64)
     layer = seen.copy()
     if levels is not None:
         levels.append(layer.copy())
+    if ckpt:
+        np.save(os.path.join(ckpt, "fwd_000.npy"), layer)
     hit = np.intersect1d(layer, basin)
     if hit.size:
         return 0, hit, bdepth[np.searchsorted(basin, hit)]
@@ -164,7 +182,7 @@ def forward_meet(p, walls, basin, bdepth, max_depth, cap, levels=None, ckpt=None
         if levels is not None:
             levels.append(layer.copy())
         if ckpt:
-            np.save(os.path.join(ckpt, f"fwd_{d:02d}.npy"), layer)
+            np.save(os.path.join(ckpt, f"fwd_{d:03d}.npy"), layer)
         hit = np.intersect1d(layer, basin)
         log(
             f"forward depth {d:3d}: +{layer.size:,} -> {seen.size:,}"
@@ -231,9 +249,12 @@ def main():
     args = ap.parse_args()
 
     cap_memory(args.mem_gb)
-    if args.ckpt:
-        os.makedirs(args.ckpt, exist_ok=True)
     p = load_puzzle(args.puzzle)
+    check_counts(p)
+    if args.ckpt:
+        # Same manifest guard solve.py uses, since the levels written here
+        # share its layout.
+        claim_dir(args.ckpt, p, explicit=True)
     walls = np.uint64(p.walls)
     popcnt = p.goals.bit_count()
 

@@ -1,9 +1,7 @@
-"""Level-synchronous BFS over uint64 bitboards, to size board.txt's state space.
-
-Diagnostic only: no parent links, so it answers "how big / is the goal in there"
-without the ~180 bytes/state that kesto.bfs.solve's dict costs.
-"""
+"""Level-synchronous BFS over uint64 bitboards, to size board.txt's state space."""
+import argparse
 import os
+import resource
 import sys
 import time
 
@@ -14,6 +12,8 @@ ROOT = os.path.dirname(HERE)  # the Kesto repo, for `import kesto` and solver.py
 sys.path.insert(0, ROOT)
 sys.path.insert(0, HERE)
 from solver import load_puzzle
+
+t0 = time.perf_counter()
 
 U64 = np.uint64
 FULL = np.uint64(0xFFFFFFFFFFFFFFFF)
@@ -29,6 +29,32 @@ _DIRS = {
     "D": (RANK7, lambda v: v << EIGHT, lambda v: v >> EIGHT),
     "U": (RANK0, lambda v: v >> EIGHT, lambda v: v << EIGHT),
 }
+
+
+def log(msg):
+    """Progress, on stderr so that stdout carries only the result.
+
+    These runs are long and usually redirected; keeping the two streams apart is
+    what lets `solve.py board.txt > answer.txt` still show its plies live.
+    """
+    print(f"[{time.perf_counter() - t0:7.1f}s] {msg}", file=sys.stderr, flush=True)
+
+
+def cap_memory(gb):
+    """Hard address-space ceiling.
+
+    Without this a bad size estimate lets the kernel OOM-killer pick a victim
+    globally -- which is how an earlier run took the whole session down. With
+    it, overshooting raises MemoryError inside this process and nothing else on
+    the machine is touched.
+    """
+    limit = int(gb * 1024**3)
+    resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+    log(f"address space capped at {gb:.1f} GiB")
+
+
+def rss_gb():
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024**2
 
 
 def vmove(blocks, walls, direction):
@@ -54,7 +80,7 @@ def bfs(puzzle, max_states):
         visited = np.union1d(visited, frontier)
         print(
             f"depth {depth:3d}  new {frontier.size:>12,}  total {visited.size:>13,}"
-            f"  {time.perf_counter() - t0:8.1f}s",
+            f"  rss={rss_gb():5.2f}G  {time.perf_counter() - t0:8.1f}s",
             flush=True,
         )
         if (frontier == goal).any():
@@ -66,7 +92,19 @@ def bfs(puzzle, max_states):
     print(f"\nEXHAUSTED at depth {depth}: {visited.size:,} states, goal NOT reachable")
 
 
-t0 = time.perf_counter()
 if __name__ == "__main__":
-    p = load_puzzle(sys.argv[1] if len(sys.argv) > 1 else "board.txt")
-    bfs(p, int(sys.argv[2]) if len(sys.argv) > 2 else 120_000_000)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("puzzle", nargs="?", default="board.txt")
+    ap.add_argument("max_states", nargs="?", type=int, default=120_000_000)
+    ap.add_argument("--mem-gb", type=float, default=4.0)
+    args = ap.parse_args()
+
+    # Before any allocation: the state cap alone does not bound memory, because
+    # union1d holds the old and new visited arrays at once, so a single ply can
+    # double the footprint between two checks of it.
+    cap_memory(args.mem_gb)
+    try:
+        bfs(load_puzzle(args.puzzle), args.max_states)
+    except MemoryError:
+        print(f"\nout of memory under the {args.mem_gb:.1f} GiB cap", flush=True)
+        sys.exit(1)

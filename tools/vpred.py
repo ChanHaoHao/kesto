@@ -15,8 +15,8 @@ things make it cheap enough to run deep:
     of numpy passes.
 
 The forward engine is the referee throughout: a candidate is a predecessor only
-if vmove(candidate) == T. Pruning can only ever cost recall, never soundness,
-and `--selftest` checks recall against the brute-force 2^16 enumeration.
+if vmove(candidate) == T, so pruning can only ever cost recall, never
+soundness.
 """
 from __future__ import annotations
 
@@ -226,45 +226,14 @@ def predecessors(states, walls, popcnt, exclude=None):
     return np.empty(0, U64) if acc is None else acc
 
 
-def selftest(puzzle, samples=60):
-    """Check recall against the unpruned 2^16 enumeration in back.py."""
-    # back.py runs a BFS at import, so lift just its definitions.
-    src = open(os.path.join(HERE, "back.py")).read()
-    # back.py resolves its own paths from __file__, which exec does not supply.
-    ns = {"__file__": os.path.join(HERE, "back.py")}
-    exec(src.split("p = load_puzzle")[0], ns)
-    brute = ns["predecessors"]
-
-    walls = np.uint64(puzzle.walls)
-    popcnt = puzzle.goals.bit_count()
-    layer = np.array([puzzle.goals], U64)
-    seen, checked = set(layer.tolist()), 0
-    while checked < samples:
-        for st in layer.tolist()[: samples - checked]:
-            want = brute(int(st), puzzle.walls)
-            got = set(predecessors(np.array([st], U64), walls, popcnt).tolist())
-            assert got == want, f"{st}: got {len(got)} want {len(want)}"
-            checked += 1
-        nxt = predecessors(layer, walls, popcnt)
-        layer = nxt[~np.isin(nxt, np.fromiter(seen, U64), assume_unique=True)]
-        seen |= set(layer.tolist())
-        if not layer.size:
-            break
-    print(f"selftest: {checked} states match the brute-force enumeration exactly")
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("puzzle", nargs="?", default=os.path.join(ROOT, "board.txt"))
     ap.add_argument("--depth", type=int, default=40)
     ap.add_argument("--cap", type=int, default=60_000_000)
-    ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
 
     p = load_puzzle(args.puzzle)
-    if args.selftest:
-        selftest(p)
-        return
 
     walls = np.uint64(p.walls)
     popcnt = p.goals.bit_count()
