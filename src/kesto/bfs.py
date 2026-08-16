@@ -98,7 +98,9 @@ def solve(puzzle: Puzzle, max_states: int = 20_000_000) -> Result:
                 q.append(next_state)
 
         if len(visited) > max_states:
-            break
+            # Giving up at the cap, not a proof of unreachability -- the
+            # frontier still holds work, so exhausted stays False.
+            return Result(None, len(visited), False)
 
     return Result(None, len(visited), True)
 
