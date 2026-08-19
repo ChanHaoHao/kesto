@@ -79,22 +79,31 @@ def solve(puzzle: Puzzle, max_states: int = 20_000_000) -> Result:
     """
 
     start = puzzle.blocks
+    if start == puzzle.goals:
+        return Result("", 1, False)
+
     q = collections.deque([start])
     visited = {start: None}
 
+    def backtrack(state):
+        path = []
+        while visited[state] is not None:
+            state, m = visited[state]
+            path.append(m)
+        return "".join(reversed(path))
+
     while q:
         state = q.popleft()
-        if state == puzzle.goals:
-            # backtrack to reconstruct the path
-            path = []
-            while visited[state] is not None:
-                state, m = visited[state]
-                path.append(m)
-            return Result("".join(reversed(path)), len(visited), False)
         for m in MOVES:
             next_state = move(state, puzzle.walls, m)
             if next_state not in visited:
                 visited[next_state] = (state, m)
+                # Tested here rather than at pop. Every edge costs one, so the
+                # first time the goal is generated it already sits at minimum
+                # depth -- and stopping now saves close to a full ply, which is
+                # the difference between finishing under the cap and not.
+                if next_state == puzzle.goals:
+                    return Result(backtrack(next_state), len(visited), False)
                 q.append(next_state)
 
         if len(visited) > max_states:

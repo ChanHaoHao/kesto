@@ -7,7 +7,10 @@ authors = [
     { name = "henry", email = "hychan@umich.edu" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    # tools/ stores states as uint64 bitboard arrays; np.bitwise_count is 2.0+.
+    "numpy>=2.0",
+]
 
 [dependency-groups]
 dev = ["pytest>=8.0"]
