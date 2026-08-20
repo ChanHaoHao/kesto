@@ -25,27 +25,25 @@ replays all fifteen published solutions exactly.
 
 ## Layout
 
-| Module | Status | What it does |
-| --- | --- | --- |
-| `kesto.board` | done | Bitboard representation, `move()`, puzzle parsing, `render()` |
-| `kesto.puzzles` | done | The 15 published case-study puzzles as a test corpus |
-| `kesto.verify` | done | Engine check and an admissibility harness for heuristics |
-| `kesto.bfs` | **stubs** | `solve`, `reachable` — plus the shared `Result` type |
-| `kesto.astar` | **stubs** | `axis_bound`, `heuristic`, `solve` |
+| Module | What it does |
+| --- | --- |
+| `kesto.board` | Bitboard representation, `move()`, puzzle parsing, `render()` |
+| `kesto.puzzles` | The 15 published case-study puzzles as a test corpus |
+| `kesto.verify` | Engine check and an admissibility harness for heuristics |
+| `kesto.bfs` | `solve`, `reachable` — plus the shared `Result` type |
+| `kesto.astar` | `axis_bound`, `heuristic`, `solve` |
+| `tools/` | numpy search engines for boards the above cannot reach — see [tools/README.md](tools/README.md) |
 
-Both solvers are yours to write. Every stub carries a full spec in its docstring —
-arguments, return contract, implementation notes and the pitfalls worth knowing. The
-engine, the corpus and the verification harnesses are done, so you can check your work
-from the first line.
+Everything is implemented. The in-package solvers are the readable reference: plain
+Python, a dict for the visited set, exact answers. `tools/` is the same mathematics
+rewritten for boards where that representation runs out of memory.
 
 ## Getting started
 
 ```bash
 uv sync
-uv run pytest    # solver tests auto-skip until each module is implemented
+uv run pytest
 ```
-
-The engine works today, so you can explore puzzles before writing any search:
 
 ```python
 from kesto import load, move
@@ -58,8 +56,6 @@ print(p.solves(p.solution))    # True: the published solution, replayed
 after = move(p.blocks, p.walls, "R")   # one swipe, every block at once
 ```
 
-Once `kesto.bfs.solve` exists:
-
 ```python
 from kesto.bfs import solve
 
@@ -67,6 +63,27 @@ r = solve(p)
 print(r.length, r.path, r.states)
 assert p.solves(r.path)
 ```
+
+Single boards from the command line, including one you transcribed yourself:
+
+```bash
+uv run python solver.py 20260608           # a bundled slug
+uv run python solver.py board.txt          # '#' wall, 'o' block, '.' goal, '-' empty
+uv run python solver.py 20260608 --solver astar
+```
+
+**For a real daily board, run `tools/solve.py` instead.** `solver.py` drives the
+in-package solvers, which is what you want for reading the algorithms or checking them
+against the corpus; it caps out well short of a hard board. `tools/solve.py` picks its
+own depths and directions and prints the optimal length, the move string and a replay
+check:
+
+```bash
+uv run python tools/solve.py board_today.txt
+```
+
+See [past where the dict runs out](#tools--past-where-the-dict-runs-out) for why the two
+exist separately.
 
 ## Why the state space is manageable
 
@@ -76,54 +93,51 @@ a handful of shifts and masks. The "stuck" set has a clean closure form — a bl
 stuck iff the cell ahead is a wall/edge or holds a block that is itself stuck — computed
 to a fixpoint.
 
-## What BFS should achieve
+Effective branching after deduplication starts near 4 and decays as the space fills. A
+representative daily board, ply by ply: 4.0, 3.5, 3.1, 2.8, 2.9, 2.8, 2.7, 2.6, 2.5,
+2.4, 2.3, 2.2, 2.1, 2.0, 1.9. Cost is therefore exponential in **solution depth**, not
+block count — an 11-block puzzle at depth 16 is easy, an 8-block one at depth 36 is not.
 
-Measured from a throwaway reference implementation, so you have targets to hit rather
-than a mystery. Python BFS at a 20M-state cap, on all 15 published puzzles. **In every
-puzzle it solved, the BFS depth equalled the published solution length** — the site's
-solutions are optimal, which makes that equality a sharp correctness check.
+## What the in-package solvers reach
 
-```
-blocks walls  pub  bfs       states      sec
-     6    10   18   18    1,502,295     3.73
-     6     2   20   20    4,859,285    14.81
-     8     2   15   15      812,086     1.20
-     8     2   22    -   >20,000,000   52.56   cap
-     5     4   22   22      833,194     2.11
-     4     4   27   27      210,967     0.59
-     8     2   23    -   >20,000,000   46.61   cap
-     8     6   14   14    1,706,496     2.80
-     8     8   21    -   >20,000,000   57.75   cap
-     4     4   29   29      329,211     1.15
-     8     4   14   14    3,249,211     6.45
-     8     4   16   16    3,312,361     7.18
-    11     4   16   16   13,196,828    27.94
-     8     4   36    -   >20,000,000   47.33   cap
-     8     6   12   12      234,304     0.31
-```
-
-11/15. Cost is exponential in **solution depth**, not block count — an 11-block puzzle at
-depth 16 solves fine, while an 8-block one at depth 36 does not. Effective branching after
-dedup is roughly 3-4x. If your state counts land in this ballpark, your implementation is
-behaving; if they are far larger, suspect the visited check.
-
-A throwaway C prototype (same algorithm, open-addressed hash table, 100M cap) got this to
-**13/15**, which says the remaining gap is memory and constant factors rather than
-anything algorithmic:
+Both solvers on all 15 published puzzles, 5M-state cap. `h0` is the A* heuristic
+evaluated at the start position, so `h0` vs `pub` shows how much of the true depth the
+bound recovers. **Every puzzle either matched the published length or hit the cap — no
+solver ever returned a non-optimal path**, and the published solutions are known
+optimal, so that equality is the sharpest correctness check available here.
 
 ```
- 8 blocks,  2 walls, depth 22   67,418,147 states   12.7s
- 8 blocks,  8 walls, depth 21   21,431,705 states    3.8s
- 8 blocks,  2 walls, depth 23   >100,000,000        cap
- 8 blocks,  4 walls, depth 36   >100,000,000        cap
+slug      blk wall  pub   h0 |  bfs      states    sec |   A*      states    sec
+20260608    8    6   12    6 |   12     234,304   0.32 |   12       7,057   0.29
+20260602    8    6   14    6 |   14   1,706,496   2.66 |   14      12,742   0.53
+20260624    8    4   14    4 |   14   3,249,211   5.63 |   14      71,432   2.98
+20260620    8    2   15   11 |   15     812,086   1.20 |   15       2,918   0.12
+20260605    8    4   16   10 |   16   3,312,361   6.85 |   16      27,373   1.14
+20260625   11    4   16    8 |    -   >5,000,000  8.55 |   16      71,478   3.41
+20260617    6   10   18    6 |   18   1,502,295   3.73 |   18      64,543   2.54
+20260527    6    2   20    6 |   20   4,859,285  14.97 |   20   1,306,603  55.52
+20260523    8    8   21   10 |    -   >5,000,000 10.56 |   21     286,972  12.34
+20260601    5    4   22    6 |   22     833,194   2.06 |   22     106,018   4.15
+20260607    8    2   22    8 |    -   >5,000,000  9.53 |    -   >5,000,000 230.48
+20260627    8    2   23    6 |    -   >5,000,000  8.92 |    -   >5,000,000 232.78
+20260528    4    4   27    6 |   27     210,967   0.58 |   27     154,747   6.37
+20260524    4    4   29    8 |   29     329,211   0.97 |   29     328,060  14.12
+20260613    8    4   36    9 |    -   >5,000,000  9.72 |    -   >5,000,000 229.96
 ```
 
-Every returned path was verified against the Python engine.
+**BFS 10/15, A* 12/15.** A* explores 22% of BFS's states on average where both finish,
+but the average hides the shape of it: on the shallow boards the bound is worth two
+orders of magnitude (234k states down to 7k), while on `20260524` it saves nothing at
+all (329,211 down to 328,060). The heuristic helps exactly where the goal is far in
+*displacement*, and stops helping where the depth comes from rearrangement instead.
+
+Note the seconds column. A* pays ~24x per state for the priority queue and the bound —
+at the cap, 230s against BFS's 9.7s. Two extra puzzles is a real gain, but on a board
+neither can finish, A* just burns the same cap far more slowly.
 
 ## The A* bound
 
-The two survivors need better pruning. `kesto/astar.py` has the full derivation in its
-module docstring; the short version:
+`kesto/astar.py` has the full derivation in its module docstring; the short version:
 
 Count swipes by direction, so length is `R + L + U + D`. A right-swipe moves any block's
 `x` by at most one, so no block's net `+x` displacement can exceed `R`. Pick a threshold
@@ -132,10 +146,6 @@ current one holds `#blocks with x >= t`, so the difference must cross the bounda
 cheapest crossing set is the nearest blocks, and the furthest of those pins a lower bound
 on `R`. Maximise over `t`, repeat per direction, sum the four.
 
-Verified admissible against all fifteen known-optimal paths — but **loose**, recovering
-only ~25-40% of true depth on the hard puzzles, so expect real but not dramatic pruning.
-Tightening it is the interesting part.
-
 ```python
 from kesto.verify import check_admissible
 from kesto.astar import heuristic
@@ -143,5 +153,33 @@ from kesto.astar import heuristic
 assert check_admissible(heuristic) == []   # empty means no overestimates
 ```
 
-Note that an empty result is necessary but not sufficient — it only samples states lying
-on optimal paths.
+That passes, but an empty result is necessary and not sufficient — it only samples
+states lying on optimal paths.
+
+The bound is admissible and **loose**: across the corpus it recovers 39% of true depth
+on average, ranging from 73% on `20260620` down to 22% on `20260528`. It is worst
+precisely where it would pay most — on the three boards nobody finishes it recovers
+36%, 26% and 25%. Tightening it is the interesting part, and the corpus makes the
+tightening measurable.
+
+## tools/ — past where the dict runs out
+
+The in-package solvers keep every visited state in a Python dict at ~149 bytes/state, so
+they exhaust memory long before they exhaust the search. At the 5M cap above, three
+published boards sit beyond both of them; raising the cap moves the line but does not
+remove it.
+
+`tools/` stores states as 8-byte bitboards in numpy arrays and grows exact BFS shells
+from *both* ends, extending whichever frontier is currently smaller. Lengths are tested
+in increasing order, so the first hit is optimal by construction — no heuristic anywhere
+in the answer.
+
+```bash
+uv run python tools/solve.py board_today.txt
+uv run python tools/solve.py 20260613 --mem-gb 5
+```
+
+This settles all fifteen published puzzles at the published optimum, `20260613` at
+depth 36 included — the three the in-package solvers cannot reach among them, each
+with its path replayed through `kesto.board` as a check. See
+[tools/README.md](tools/README.md) for the other three engines and the memory rules.
