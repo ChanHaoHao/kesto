@@ -6,13 +6,15 @@ tops out around ply 17 on a 16-block board. Everything here stores states as
 8-byte bitboards in numpy arrays instead, which is what makes depth-30+ boards
 reachable.
 
-Every script takes the same puzzle argument as `solver.py`: a grid file, a
-bundled slug, or an encoded puzzle string.
+Every search script takes the same puzzle argument as `solver.py`: a grid file,
+a bundled slug, or an encoded puzzle string. `vision.py` is the exception --
+it takes a screenshot and writes one of those grid files.
 
 ## Start here
 
 ```bash
-.venv/bin/python tools/solve.py board.txt
+.venv/bin/python tools/vision.py board.png -o board_today.txt   # if you have a screenshot
+.venv/bin/python tools/solve.py board_today.txt
 ```
 
 `solve.py` is the one you want in almost every case. It picks depths and
@@ -24,11 +26,16 @@ The other three are the layers underneath it, usable on their own:
 | I want to… | use |
 | --- | --- |
 | **solve a board optimally** | **`solve.py`** |
+| turn a screenshot into a grid file | `vision.py` |
+| see how it read that screenshot | `vision.py --vis` |
 | know how big the board's state space is | `probe.py` |
 | a simpler one-shot bidirectional search | `meet.py` |
 | see the backward levels alone | `vpred.py` |
 
-The dependency order is `probe.py` → `vpred.py` → `meet.py` → `solve.py`:
+`vision.py` stands apart from the rest and imports none of them; it is a way
+into the grid format, not a search. `visualise.py` is its `--vis` drawing half
+and nothing else imports it. The dependency order of the other four is
+`probe.py` → `vpred.py` → `meet.py` → `solve.py`:
 `probe.py` is the leaf, owning the vectorised forward engine `vmove` plus
 `cap_memory`/`log`/`rss_gb`; `vpred.py` owns `predecessors`; `meet.py` owns the
 sorted-array set operations. `solve.py` imports from all three.
@@ -66,6 +73,73 @@ Only files matching the level naming (`fwd_NNN.npy`, `back_NNN.npy`,
 
 **Limit:** it needs both shells resident to extend. Boards whose next required
 ply exceeds RAM can't be finished this way.
+
+## vision.py — screenshot to grid
+
+```bash
+.venv/bin/python tools/vision.py board.png
+.venv/bin/python tools/vision.py board.png -o board_today.txt
+.venv/bin/python tools/vision.py board.png --debug
+.venv/bin/python tools/vision.py board.png --vis steps/
+```
+
+Prints the board in the charset every other entry point reads, so transcribing
+the daily puzzle by hand is optional.
+
+There is deliberately no computer vision in it. The site draws the board to a
+canvas as flat fills on an exact pixel grid: a real capture holds 220 distinct
+colours, 93% of its pixels are one of six of them, and there is no noise,
+lighting or perspective to model. So the lattice comes from projection profiles
+-- the gutters between cells are deep dips in the row and column sums -- and the
+cell type comes from a colour lookup. Every threshold sits in the middle of a
+gap an order of magnitude wider than it needs.
+
+Two things are worth knowing before you change it:
+
+- **A goal's interior is byte-identical to an empty cell.** The goal is drawn
+  only as a thin rounded outline, so sampling the centre pixel of each cell --
+  the obvious first implementation -- reads every goal as empty. Cells are
+  scored over their whole footprint instead.
+- **The wall/empty cut is derived, not hardcoded.** Absolute greys are a styling
+  choice and can change; that walls render lighter than empty cells is
+  structural, so `_split_greys` clusters the greys actually present. A board
+  with no walls leaves one cluster and stays wall-free.
+
+It requires a screenshot. A photo of a monitor needs the board quad found and a
+homography applied first, and `find_grid` refuses such an image rather than
+guessing at it -- as it does for a crop that caught page chrome, or one that cut
+the board off mid-grid. A read whose block count does not match its goal count
+is rejected too, since a swipe preserves that count and no solver could use the
+result.
+
+### Watching it work
+
+`--debug` prints the lattice and the per-cell measurements behind a disputed
+read. `--vis DIR` draws the whole pipeline instead, one numbered PNG per stage
+(`vis/` if you name no directory):
+
+| | |
+| --- | --- |
+| `01_input` | the capture, with its colour count |
+| `02_cellmask` | which pixels belong to a cell rather than a gutter |
+| `03_profiles` | that mask summed down each axis, gutters and floor marked |
+| `04_lattice` | where the cell boundaries landed |
+| `05_channels` | the warm, cool and grey masks the classifier reads |
+| `06_greysplit` | the grey levels present, and the cut 2-means drew through them |
+| `07_board` | the read, laid back over the picture it came from |
+
+Stages 3 and 6 are the two claims the method rests on, drawn out: that the
+gutters are unmistakable dips, and that the cell types cluster nowhere near each
+other. Stage 5 is where the goal-versus-empty trap is visible -- a goal's
+interior is the same grey as an empty cell, and only the ring separates them.
+
+A **rejected** image still gets stages 1-3, which is where a rejection is
+visible nearly every time: the caption on `03_profiles` reads back the gutter
+count it found against the seven it needed. That is the first thing to look at
+when a board will not parse.
+
+The drawing lives in `visualise.py`, imported only when the flag is passed.
+Nothing there feeds a board back into a solver.
 
 ## probe.py — size the space
 
@@ -139,6 +213,15 @@ done
 `vmove` is checked against `kesto.board.move`, the reference engine, by running
 both over the same states — they agree everywhere, which is what lets the numpy
 engines stand in for the one the corpus validates.
+
+`vision.py` is covered by `tests/test_vision.py`, which pins a real capture
+(`tests/fixtures/board.png`) against the board transcribed from it by hand, and
+then round-trips all fifteen corpus puzzles through a renderer built in the
+site's palette. That covers what one screenshot cannot: `*` cells, wall-free
+boards, every block count from 4 to 11, and the resampled and JPEG-recompressed
+captures that first exposed the gutter threshold as too strict. `--vis` is
+covered too -- that it draws every stage on a good image, only the stages it
+reached on a rejected one, and that it stays a side effect of a normal read.
 
 A board whose block count differs from its goal count is rejected up front by
 every entry point — the count is invariant under a swipe, so such a board cannot

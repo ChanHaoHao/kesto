@@ -12,3 +12,6 @@ wheels/
 
 # Checkpointed BFS levels from tools/ -- large and regenerable
 work/
+
+# Default output of tools/vision.py --vis
+vis/

@@ -32,7 +32,7 @@ replays all fifteen published solutions exactly.
 | `kesto.verify` | Engine check and an admissibility harness for heuristics |
 | `kesto.bfs` | `solve`, `reachable` — plus the shared `Result` type |
 | `kesto.astar` | `axis_bound`, `heuristic`, `solve` |
-| `tools/` | numpy search engines for boards the above cannot reach — see [tools/README.md](tools/README.md) |
+| `tools/` | numpy search engines for boards the above cannot reach, plus `vision.py` — see [tools/README.md](tools/README.md) |
 
 Everything is implemented. The in-package solvers are the readable reference: plain
 Python, a dict for the visited set, exact answers. `tools/` is the same mathematics
@@ -183,3 +183,16 @@ This settles all fifteen published puzzles at the published optimum, `20260613` 
 depth 36 included — the three the in-package solvers cannot reach among them, each
 with its path replayed through `kesto.board` as a check. See
 [tools/README.md](tools/README.md) for the other three engines and the memory rules.
+
+If you have a screenshot of the board rather than a transcription, `tools/vision.py`
+reads one into the same grid format, and the whole daily is two commands:
+
+```bash
+uv run python tools/vision.py board.png -o board_today.txt
+uv run python tools/solve.py board_today.txt
+```
+
+There is no real computer vision in it — the site draws flat fills on an exact
+pixel grid, so the lattice comes from projection profiles and the cell type from
+a colour lookup. `--vis DIR` draws every stage of that to numbered PNGs if you
+want to watch it work, or to see why a board would not parse.

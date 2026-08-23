@@ -10,6 +10,9 @@ requires-python = ">=3.12"
 dependencies = [
     # tools/ stores states as uint64 bitboard arrays; np.bitwise_count is 2.0+.
     "numpy>=2.0",
+    # tools/vision.py decodes board screenshots; Pillow normalises the
+    # PNG/JPEG flavours a screen capture can arrive in.
+    "pillow>=10.0",
 ]
 
 [dependency-groups]
