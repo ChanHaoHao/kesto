@@ -2,17 +2,16 @@
 """Read a Kesto board off a screenshot of the site.
 
 Usage:
-    python tools/vision.py board.png --solve
-    python tools/vision.py board.png
-    python tools/vision.py board.png -o board_today.txt
-    python tools/vision.py board.png --debug
-    python tools/vision.py board.png --vis steps/
+    kesto read board.png --solve
+    kesto read board.png
+    kesto read board.png -o board_today.txt
+    kesto read board.png --debug
+    kesto read board.png --vis steps/
 
-Emits the same grid text `solver.py` and everything in `tools/` already parse
-(`#` wall, `o` block, `.` goal, `*` block on goal, `-` empty), so a screenshot
-drops into any of them. `--solve` hands the board it just read straight to
-`solve.py` instead, which is the whole daily in one command and needs no file
-in between.
+Emits the grid text `kesto.grid` parses (`#` wall, `o` block, `.` goal, `*`
+block on goal, `-` empty), so a screenshot drops in wherever a board does.
+`--solve` hands the board it just read straight to the search instead, which is
+the whole daily in one command and needs no file in between.
 
 Why there is no real computer vision here
 -----------------------------------------
@@ -39,7 +38,6 @@ therefore scores whole cell footprints, never centre pixels.
 from __future__ import annotations
 
 import argparse
-import importlib
 import os
 import sys
 from typing import NamedTuple
@@ -47,10 +45,7 @@ from typing import NamedTuple
 import numpy as np
 from PIL import Image
 
-N = 8
-
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
+from .board import N
 
 # --- classification thresholds -----------------------------------------------
 #
@@ -75,19 +70,6 @@ GUTTER_DIP = 0.5  # gutters fall to this fraction of the profile's cell plateau
 
 class BoardNotFound(Exception):
     """The image does not look like a board screenshot."""
-
-
-def _sibling(name):
-    """Import a tools/ or repo-root script on demand.
-
-    Those are scripts rather than a package, and both of the modules reached
-    this way are optional: `visualise` only when `--vis` is passed, `solve` only
-    when `--solve` is, which keeps a plain read off the numpy search stack.
-    """
-    for d in (HERE, ROOT):
-        if d not in sys.path:
-            sys.path.insert(0, d)
-    return importlib.import_module(name)
 
 
 class Profile(NamedTuple):
@@ -291,8 +273,8 @@ def debug_report(a):
         print("  " + " ".join(line))
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="kesto read", description=__doc__.splitlines()[0])
     ap.add_argument("image", help="screenshot of the board")
     ap.add_argument("-o", "--out", help="write the grid here instead of stdout")
     ap.add_argument("--debug", action="store_true", help="dump per-cell measurements")
@@ -310,7 +292,7 @@ def main():
         metavar="DIR",
         help="draw each pipeline stage to numbered PNGs in DIR (default: vis/)",
     )
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     try:
         rgb = load_rgb(args.image)
@@ -327,8 +309,10 @@ def main():
 
     if args.vis:
         # Drawing lives in a sibling module so the method above stays readable,
-        # and nothing else uses it.
-        for path in _sibling("visualise").draw_steps(rgb, a, args.vis):
+        # imported here so a plain read never pays for it.
+        from .visualise import draw_steps
+
+        for path in draw_steps(rgb, a, args.vis):
             print(f"  {path}", file=sys.stderr)
     if args.debug and a is not None:
         debug_report(a)
@@ -346,14 +330,12 @@ def main():
     print(a.text, flush=True)
 
     if args.solve:
-        # `solve.run` owns the memory cap, the scratch directory and its
-        # cleanup, so the board goes to exactly the search `solve.py board.txt`
-        # would have run -- the file in between was the only thing dropped.
-        puzzle = _sibling("solver").parse_grid(a.text)
+        # `run` owns the memory cap, the scratch directory and its cleanup,
+        # so the board reaches exactly the search `kesto solve board.txt` would
+        # have run -- the file in between was the only thing dropped.
+        from .grid import parse_grid
+        from .search.bidirectional import run
+
         tag = os.path.splitext(os.path.basename(args.image))[0]
-        return _sibling("solve").run(puzzle, tag, args.mem_gb, max_len=args.max_len)
+        return run(parse_grid(a.text), tag, args.mem_gb, max_len=args.max_len)
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

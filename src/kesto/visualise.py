@@ -19,7 +19,7 @@ import os
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from vision import CELL_FLOOR, GUTTER_DIP, N, profile_axis
+from .vision import CELL_FLOOR, GUTTER_DIP, N, profile_axis
 
 PAPER = (16, 16, 18)
 INK = (238, 238, 240)

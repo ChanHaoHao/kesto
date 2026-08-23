@@ -1,19 +1,22 @@
 [project]
 name = "kesto"
 version = "0.1.0"
-description = "Optimal solvers for Kesto, the daily 8x8 sliding-block puzzle"
+description = "Read a Kesto board off a screenshot and solve it optimally"
 readme = "README.md"
 authors = [
     { name = "henry", email = "hychan@umich.edu" }
 ]
 requires-python = ">=3.12"
 dependencies = [
-    # tools/ stores states as uint64 bitboard arrays; np.bitwise_count is 2.0+.
+    # kesto.search stores states as uint64 bitboard arrays; np.bitwise_count is 2.0+.
     "numpy>=2.0",
-    # tools/vision.py decodes board screenshots; Pillow normalises the
-    # PNG/JPEG flavours a screen capture can arrive in.
+    # kesto.vision decodes board screenshots; Pillow normalises the PNG/JPEG
+    # flavours a screen capture can arrive in.
     "pillow>=10.0",
 ]
+
+[project.scripts]
+kesto = "kesto.cli:main"
 
 [dependency-groups]
 dev = ["pytest>=8.0"]

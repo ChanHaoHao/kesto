@@ -18,31 +18,32 @@ The forward engine is the referee throughout: a candidate is a predecessor only
 if vmove(candidate) == T, so pruning can only ever cost recall, never
 soundness.
 """
-from __future__ import annotations
 
-import argparse
-import os
-import sys
-import time
+from __future__ import annotations
 
 import numpy as np
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)  # the Kesto repo, for `import kesto` and solver.py
-sys.path.insert(0, ROOT)
-sys.path.insert(0, HERE)
-
-from probe import U64, vmove  # the validated forward engine
-
-from solver import load_puzzle
+from .engine import U64, vmove  # the validated forward engine
 
 N = 8
+
+
 # Cell offsets: `ahead` is where a block is heading, `behind` is where a block
 # that lands on this cell must have come from.
 _STEP = {"U": (0, -1), "D": (0, 1), "L": (-1, 0), "R": (1, 0)}
 
+
 # Candidate budget per batch, in (state, assignment) pairs.
 CHUNK = 1 << 21
+
+# Fold partial results into the running set once this many candidates pile up.
+# Accumulating every hit and deduping once at the end costs peak memory
+# proportional to the raw predecessor count (with multiplicity), which is what
+# put backward ply 12 out of reach.
+FLUSH = 16 << 20
+
+# States whose Python option tuples are materialised at once.
+STATE_CHUNK = 1 << 18
 
 
 def _tables(direction, walls):
@@ -100,15 +101,6 @@ def _options(state, ahead, behind, can_move, blocked):
         else:
             return None
     return base, pairs
-
-
-# Fold partial results into the running set once this many candidates pile up.
-# Accumulating every hit and deduping once at the end costs peak memory
-# proportional to the raw predecessor count (with multiplicity), which is what
-# put backward ply 12 out of reach.
-FLUSH = 16 << 20
-# States whose Python option tuples are materialised at once.
-STATE_CHUNK = 1 << 18
 
 
 def _not_in(cand, seen):
@@ -225,46 +217,3 @@ def predecessors(states, walls, popcnt, exclude=None):
     acc = _fold(acc, out, exclude)
     return np.empty(0, U64) if acc is None else acc
 
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("puzzle", nargs="?", default=os.path.join(ROOT, "board.txt"))
-    ap.add_argument("--depth", type=int, default=40)
-    ap.add_argument("--cap", type=int, default=60_000_000)
-    args = ap.parse_args()
-
-    p = load_puzzle(args.puzzle)
-
-    walls = np.uint64(p.walls)
-    popcnt = p.goals.bit_count()
-    if popcnt != p.blocks.bit_count():
-        print(f"block/goal count mismatch: {p.blocks.bit_count()} vs {popcnt}")
-        return
-
-    start = np.uint64(p.blocks)
-    seen = np.array([p.goals], U64)
-    layer = seen.copy()
-    t0 = time.perf_counter()
-    for depth in range(1, args.depth + 1):
-        nxt = predecessors(layer, walls, popcnt)
-        layer = nxt[np.isin(nxt, seen, assume_unique=True, invert=True)]
-        seen = np.union1d(seen, layer)
-        print(
-            f"back-depth {depth:3d}  new {layer.size:>12,}  total {seen.size:>13,}"
-            f"  {time.perf_counter() - t0:8.1f}s",
-            flush=True,
-        )
-        if (layer == start).any():
-            print(f"\nSTART REACHED -- board is SOLVABLE, optimal depth {depth}")
-            return
-        if not layer.size:
-            print(f"\nbackward space CLOSED at {seen.size:,} states")
-            print("the start is not among them -- board is UNSOLVABLE")
-            return
-        if seen.size > args.cap:
-            print(f"\ngave up: over cap at depth {depth}")
-            return
-
-
-if __name__ == "__main__":
-    main()

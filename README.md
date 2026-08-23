@@ -1,6 +1,23 @@
 # kesto
 
-Optimal solvers for [Kesto](https://kestopuzzle.com/), the daily 8x8 sliding-block puzzle.
+Reads a [Kesto](https://kestopuzzle.com/) board off a screenshot and solves it
+optimally. Kesto is a daily 8x8 sliding-block puzzle.
+
+```bash
+uv sync
+uv run kesto read board.png --solve
+```
+
+```
+o - - - - - - -        OPTIMAL: 26 moves
+- o - - - - - -        path   : DDUUUURRRRRLUDLLDDRRUDDLLL
+- - o - - # - -        verify : OK -- replays onto every goal
+- - - o - - - -
+- . - . o - - -
+. - . - . o - -
+- . - . - - o -
+- - . - - - - o
+```
 
 ## The rules
 
@@ -23,177 +40,171 @@ relative arrangement is to park some against an obstruction while the rest keep 
 The engine in `kesto.board` was reverse-engineered from the site's own JS bundle and
 replays all fifteen published solutions exactly.
 
+## The two commands
+
+```bash
+uv run kesto read board.png --solve     # screenshot straight to an answer
+uv run kesto solve board.txt            # a board you transcribed
+uv run kesto solve 20260613             # a bundled puzzle, by slug
+```
+
+`read` turns a capture of the site into grid text; `--solve` hands that board to
+the search without writing a file. Without it you get the grid on stdout, and
+`-o FILE` writes it. `solve` takes a grid file, a bundled slug, or an encoded
+puzzle string from the site.
+
+Grid files use the charset `kesto.board.render` emits, so a rendered board pastes
+straight back in:
+
+```
+# wall   o block   . goal   * block already on a goal   - empty
+```
+
 ## Layout
 
 | Module | What it does |
 | --- | --- |
 | `kesto.board` | Bitboard representation, `move()`, puzzle parsing, `render()` |
-| `kesto.puzzles` | The 15 published case-study puzzles as a test corpus |
-| `kesto.verify` | Engine check and an admissibility harness for heuristics |
-| `kesto.bfs` | `solve`, `reachable` — plus the shared `Result` type |
-| `kesto.astar` | `axis_bound`, `heuristic`, `solve` |
-| `tools/` | numpy search engines for boards the above cannot reach, plus `vision.py` — see [tools/README.md](tools/README.md) |
+| `kesto.grid` | Grid text and puzzle arguments — `parse_grid`, `load_puzzle` |
+| `kesto.vision` | Reads a board off a screenshot — see [the method](#kestovision--no-computer-vision) |
+| `kesto.visualise` | Draws each vision stage for `--vis` |
+| `kesto.search` | Bidirectional BFS over uint64 bitboards |
+| `kesto.puzzles` | The 15 published puzzles as a test corpus |
+| `kesto.verify` | Replays the published solutions through the engine |
 
-Everything is implemented. The in-package solvers are the readable reference: plain
-Python, a dict for the visited set, exact answers. `tools/` is the same mathematics
-rewritten for boards where that representation runs out of memory.
+`kesto.search` is four modules in dependency order — `engine` → `backward` →
+`levels` → `bidirectional`. `engine` owns the vectorised `vmove` plus the memory
+guards, `backward` owns `predecessors`, `levels` owns the sorted-array set
+algebra and the scratch directory, and `bidirectional` grows both shells and
+meets them in the middle.
 
-## Getting started
+## kesto.vision — no computer vision
+
+The site renders the board to a canvas as flat fills on an exact pixel grid: a
+capture holds around 220 distinct colours, 93% of its pixels are one of six of
+them, and there is no noise, lighting or perspective to model. So the lattice
+comes from **projection profiles** — the gutters between cells are deep dips in
+the row and column sums — and the cell type comes from a **colour lookup**.
+Contours, template matching and Hough transforms would all be answering a harder
+question than the one being asked.
+
+Two things the method turns on, both easy to get wrong:
+
+- **A goal's interior is byte-identical to an empty cell.** The goal is drawn only
+  as a thin rounded outline, so sampling the centre pixel of each cell — the
+  obvious first implementation — reads every goal as empty. Cells are scored over
+  their whole footprint instead.
+- **The wall/empty cut is derived, not hardcoded.** Absolute greys are a styling
+  choice and can change; that walls render lighter than empty cells is structural,
+  so `_split_greys` clusters the greys actually present. A board with no walls
+  leaves one cluster and stays wall-free.
+
+Gutters are found by a threshold **relative** to the profile's plateau, not an
+absolute pixel count. A downscaled or JPEG-recompressed capture blurs the gutter
+to a single pixel that never reaches zero, and an absolute threshold read those
+as a 4x4 board — silently.
+
+It requires a screenshot. A photo of a monitor needs the board quad found and a
+homography applied first, and `find_grid` refuses such an image rather than
+guessing — as it does for a crop that caught page chrome, or one that cut the
+board off mid-grid. A read whose block count does not match its goal count is
+rejected too, since a swipe preserves that count and no solver could use the
+result.
+
+### Watching it work
+
+`--debug` prints the lattice and the per-cell measurements behind a disputed
+read. `--vis DIR` draws the whole pipeline instead, one numbered PNG per stage
+(`vis/` if you name no directory):
+
+| | |
+| --- | --- |
+| `01_input` | the capture, with its colour count |
+| `02_cellmask` | which pixels belong to a cell rather than a gutter |
+| `03_profiles` | that mask summed down each axis, gutters and floor marked |
+| `04_lattice` | where the cell boundaries landed |
+| `05_channels` | the warm, cool and grey masks the classifier reads |
+| `06_greysplit` | the grey levels present, and the cut 2-means drew through them |
+| `07_board` | the read, laid back over the picture it came from |
+
+Stages 3 and 6 are the two claims the method rests on, drawn out. Stage 5 is
+where the goal-versus-empty trap is visible.
+
+A **rejected** image still gets stages 1-3, which is where a rejection is visible
+nearly every time: the caption on `03_profiles` reads back the gutter count it
+found against the seven it needed. That is the first thing to look at when a
+board will not parse.
+
+## kesto.search — how it decides
+
+Both ends are grown as exact BFS shells. A solution of length L exists iff
+`fwd[df]` meets `back[L - df]` for some split, so lengths are tested in
+increasing order and the first one that hits is optimal by construction — there
+is no heuristic anywhere in the answer, and no depth to guess.
+
+Which side grows next is decided by whichever frontier is currently smaller,
+since that is the cheaper ply to expand. Boards differ wildly in which direction
+is cheap: some have tiny backward branching and huge forward branching, some the
+reverse, so committing to one direction in advance is what makes a board look
+unsolvable when it merely needed the other end.
+
+States are 8-byte bitboards in sorted numpy arrays rather than dict keys (~149
+bytes each), which is what puts depth-30 boards in reach at all.
+
+Predecessors are found by enumeration rather than inversion, pruned per block,
+and every candidate is confirmed with `vmove(candidate) == T` — so pruning can
+cost recall but never soundness.
+
+### Memory
+
+**Always pass `--mem-gb`.** It sets `RLIMIT_AS`, so overshooting raises
+`MemoryError` inside the search instead of letting the kernel OOM-killer pick a
+victim across the whole machine. Set it below free RAM, not below total RAM. A
+ply roughly doubles resident size. Without the flag it defaults to 60% of
+`MemAvailable`.
+
+**Every run is a new board, and leaves nothing behind.** Scratch goes to
+`work/<boardname>/` under the working directory, cleared on the way in and again
+on the way out — solved, `UNSOLVABLE`, gave up at `--max-len`, failed verify,
+crashed, or Ctrl-C. There is no resume and no state carried between runs. Only
+files matching the level naming are removed, so anything else there survives.
+
+**Limit:** it needs both shells resident to extend. Boards whose next required
+ply exceeds RAM can't be finished this way.
+
+## Validation
 
 ```bash
-uv sync
 uv run pytest
 ```
 
-```python
-from kesto import load, move
-
-p = load()[0]
-print(p.title, "-", p.n_blocks, "blocks")
-print(p)                       # '#' wall, 'o' block, '.' goal, '*' block on goal
-
-print(p.solves(p.solution))    # True: the published solution, replayed
-after = move(p.blocks, p.walls, "R")   # one swipe, every block at once
-```
-
-```python
-from kesto.bfs import solve
-
-r = solve(p)
-print(r.length, r.path, r.states)
-assert p.solves(r.path)
-```
-
-Single boards from the command line, including one you transcribed yourself:
+The bundled corpus is the end-to-end check, and the published solutions are known
+optimal, so matching their length is a sharp test rather than a smoke test:
 
 ```bash
-uv run python solver.py 20260608           # a bundled slug
-uv run python solver.py board.txt          # '#' wall, 'o' block, '.' goal, '-' empty
-uv run python solver.py 20260608 --solver astar
+for s in 20260608 20260602 20260624 20260620 20260605 \
+         20260625 20260617 20260527 20260523 20260601 \
+         20260607 20260627 20260528 20260524 20260613; do
+    uv run kesto solve $s --mem-gb 6 2>/dev/null | grep OPTIMAL
+done
 ```
 
-**For a real daily board, run `tools/solve.py` instead.** `solver.py` drives the
-in-package solvers, which is what you want for reading the algorithms or checking them
-against the corpus; it caps out well short of a hard board. `tools/solve.py` picks its
-own depths and directions and prints the optimal length, the move string and a replay
-check:
+This returns the published optimum on all fifteen, from `20260608` at 12 moves
+through `20260613` at 36, each with `verify: OK`.
 
-```bash
-uv run python tools/solve.py board_today.txt
-```
+The suite pins three things in particular:
 
-See [past where the dict runs out](#tools--past-where-the-dict-runs-out) for why the two
-exist separately.
+- **`vmove` against `kesto.board.move`**, over every reachable state within three
+  plies of each corpus board, in all four directions. Nothing in `kesto.search`
+  calls the reference engine, so every answer rests on those two agreeing.
+- **`predecessors` soundness** — every state it returns really does step onto the
+  target.
+- **`kesto.vision`** against a real capture, plus all fifteen corpus boards
+  round-tripped through a renderer built in the site's palette. That covers what
+  one screenshot cannot: `*` cells, wall-free boards, every block count, and the
+  resampled and JPEG-recompressed captures that first exposed the gutter
+  threshold as too strict.
 
-## Why the state space is manageable
-
-Blocks are interchangeable, so a state is fully described by the 64-bit block occupancy
-bitboard. That is the visited key: no permutation blow-up, and the successor function is
-a handful of shifts and masks. The "stuck" set has a clean closure form — a block is
-stuck iff the cell ahead is a wall/edge or holds a block that is itself stuck — computed
-to a fixpoint.
-
-Effective branching after deduplication starts near 4 and decays as the space fills. A
-representative daily board, ply by ply: 4.0, 3.5, 3.1, 2.8, 2.9, 2.8, 2.7, 2.6, 2.5,
-2.4, 2.3, 2.2, 2.1, 2.0, 1.9. Cost is therefore exponential in **solution depth**, not
-block count — an 11-block puzzle at depth 16 is easy, an 8-block one at depth 36 is not.
-
-## What the in-package solvers reach
-
-Both solvers on all 15 published puzzles, 5M-state cap. `h0` is the A* heuristic
-evaluated at the start position, so `h0` vs `pub` shows how much of the true depth the
-bound recovers. **Every puzzle either matched the published length or hit the cap — no
-solver ever returned a non-optimal path**, and the published solutions are known
-optimal, so that equality is the sharpest correctness check available here.
-
-```
-slug      blk wall  pub   h0 |  bfs      states    sec |   A*      states    sec
-20260608    8    6   12    6 |   12     234,304   0.32 |   12       7,057   0.29
-20260602    8    6   14    6 |   14   1,706,496   2.66 |   14      12,742   0.53
-20260624    8    4   14    4 |   14   3,249,211   5.63 |   14      71,432   2.98
-20260620    8    2   15   11 |   15     812,086   1.20 |   15       2,918   0.12
-20260605    8    4   16   10 |   16   3,312,361   6.85 |   16      27,373   1.14
-20260625   11    4   16    8 |    -   >5,000,000  8.55 |   16      71,478   3.41
-20260617    6   10   18    6 |   18   1,502,295   3.73 |   18      64,543   2.54
-20260527    6    2   20    6 |   20   4,859,285  14.97 |   20   1,306,603  55.52
-20260523    8    8   21   10 |    -   >5,000,000 10.56 |   21     286,972  12.34
-20260601    5    4   22    6 |   22     833,194   2.06 |   22     106,018   4.15
-20260607    8    2   22    8 |    -   >5,000,000  9.53 |    -   >5,000,000 230.48
-20260627    8    2   23    6 |    -   >5,000,000  8.92 |    -   >5,000,000 232.78
-20260528    4    4   27    6 |   27     210,967   0.58 |   27     154,747   6.37
-20260524    4    4   29    8 |   29     329,211   0.97 |   29     328,060  14.12
-20260613    8    4   36    9 |    -   >5,000,000  9.72 |    -   >5,000,000 229.96
-```
-
-**BFS 10/15, A* 12/15.** A* explores 22% of BFS's states on average where both finish,
-but the average hides the shape of it: on the shallow boards the bound is worth two
-orders of magnitude (234k states down to 7k), while on `20260524` it saves nothing at
-all (329,211 down to 328,060). The heuristic helps exactly where the goal is far in
-*displacement*, and stops helping where the depth comes from rearrangement instead.
-
-Note the seconds column. A* pays ~24x per state for the priority queue and the bound —
-at the cap, 230s against BFS's 9.7s. Two extra puzzles is a real gain, but on a board
-neither can finish, A* just burns the same cap far more slowly.
-
-## The A* bound
-
-`kesto/astar.py` has the full derivation in its module docstring; the short version:
-
-Count swipes by direction, so length is `R + L + U + D`. A right-swipe moves any block's
-`x` by at most one, so no block's net `+x` displacement can exceed `R`. Pick a threshold
-`t`: the final position must hold `#goals with x >= t` blocks in that region while the
-current one holds `#blocks with x >= t`, so the difference must cross the boundary. The
-cheapest crossing set is the nearest blocks, and the furthest of those pins a lower bound
-on `R`. Maximise over `t`, repeat per direction, sum the four.
-
-```python
-from kesto.verify import check_admissible
-from kesto.astar import heuristic
-
-assert check_admissible(heuristic) == []   # empty means no overestimates
-```
-
-That passes, but an empty result is necessary and not sufficient — it only samples
-states lying on optimal paths.
-
-The bound is admissible and **loose**: across the corpus it recovers 39% of true depth
-on average, ranging from 73% on `20260620` down to 22% on `20260528`. It is worst
-precisely where it would pay most — on the three boards nobody finishes it recovers
-36%, 26% and 25%. Tightening it is the interesting part, and the corpus makes the
-tightening measurable.
-
-## tools/ — past where the dict runs out
-
-The in-package solvers keep every visited state in a Python dict at ~149 bytes/state, so
-they exhaust memory long before they exhaust the search. At the 5M cap above, three
-published boards sit beyond both of them; raising the cap moves the line but does not
-remove it.
-
-`tools/` stores states as 8-byte bitboards in numpy arrays and grows exact BFS shells
-from *both* ends, extending whichever frontier is currently smaller. Lengths are tested
-in increasing order, so the first hit is optimal by construction — no heuristic anywhere
-in the answer.
-
-```bash
-uv run python tools/solve.py board_today.txt
-uv run python tools/solve.py 20260613 --mem-gb 5
-```
-
-This settles all fifteen published puzzles at the published optimum, `20260613` at
-depth 36 included — the three the in-package solvers cannot reach among them, each
-with its path replayed through `kesto.board` as a check. See
-[tools/README.md](tools/README.md) for the other three engines and the memory rules.
-
-If you have a screenshot of the board rather than a transcription, `tools/vision.py`
-reads one into the same grid format, and `--solve` hands it straight to the search
-above — the whole daily in one command, with no file in between:
-
-```bash
-uv run python tools/vision.py board.png --solve
-uv run python tools/vision.py board.png -o board_today.txt   # or just the grid
-```
-
-There is no real computer vision in it — the site draws flat fills on an exact
-pixel grid, so the lattice comes from projection profiles and the cell type from
-a colour lookup. `--vis DIR` draws every stage of that to numbered PNGs if you
-want to watch it work, or to see why a board would not parse.
+A board whose block count differs from its goal count is rejected up front by
+every entry point — the count is invariant under a swipe, so such a board cannot
+be solved and any bound reported for it would be meaningless.

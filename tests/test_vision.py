@@ -1,9 +1,9 @@
-"""Round-trip tests for tools/vision.py.
+"""Round-trip tests for kesto.vision.
 
 `tests/fixtures/board.png` is a real capture off the site and the ground truth
 for the real thing; `test_real_screenshot` pins it against the grid transcribed
-from it by hand. It lives here rather than at the repo root because the root
-copy is a scratch file the daily workflow overwrites.
+from it by hand. It lives here rather than at the repo root because a
+root copy is a scratch file the daily workflow overwrites.
 
 The rest render the published corpus in the site's palette and read it back,
 which covers the cases one screenshot cannot: `*` (a block already sitting on a
@@ -21,15 +21,11 @@ import pytest
 
 from kesto import load
 from kesto.board import render
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
-
-from vision import BoardNotFound, analyse, load_rgb, read_board  # noqa: E402
+from kesto.vision import BoardNotFound, analyse, load_rgb, read_board
 
 Image = pytest.importorskip("PIL.Image")
 ImageDraw = pytest.importorskip("PIL.ImageDraw")
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 PUZZLES = load()
 
@@ -156,7 +152,7 @@ def _drawn(out_dir):
 
 
 def test_vis_draws_every_stage(tmp_path):
-    from visualise import draw_steps
+    from kesto.visualise import draw_steps
 
     rgb = load_rgb(os.path.join(FIXTURES, "board.png"))
     out = tmp_path / "vis"
@@ -167,7 +163,7 @@ def test_vis_draws_every_stage(tmp_path):
 
 def test_vis_draws_what_it_reached_on_a_rejected_image(tmp_path):
     """The stages a rejection needs are exactly the ones computed before it."""
-    from visualise import draw_steps
+    from kesto.visualise import draw_steps
 
     want = render(PUZZLES[0].blocks, PUZZLES[0].walls, PUZZLES[0].goals)
     png = draw_board(want, tmp_path / "full.png")
@@ -187,11 +183,7 @@ def test_vis_draws_what_it_reached_on_a_rejected_image(tmp_path):
 def test_vis_flag_still_prints_the_board(tmp_path):
     """--vis is a side effect; it must not disturb stdout or the exit code."""
     out = tmp_path / "steps"
-    proc = subprocess.run(
-        [sys.executable, os.path.join(ROOT, "tools", "vision.py"),
-         os.path.join(FIXTURES, "board.png"), "--vis", str(out)],
-        capture_output=True, text=True,
-    )
+    proc = _cli(os.path.join(FIXTURES, "board.png"), "--vis", str(out))
     assert proc.returncode == 0
     assert proc.stdout.strip() == REAL_BOARD
     assert _drawn(out) == STAGES
@@ -200,11 +192,11 @@ def test_vis_flag_still_prints_the_board(tmp_path):
 # --- --solve -------------------------------------------------------------------
 
 
-def _cli(*args):
-    """Run vision.py as the user does. Subprocess because --solve caps RLIMIT_AS."""
+def _cli(*args, cmd="read", cwd=None):
+    """Run the CLI as the user does. Subprocess because --solve caps RLIMIT_AS."""
     return subprocess.run(
-        [sys.executable, os.path.join(ROOT, "tools", "vision.py"), *args],
-        capture_output=True, text=True,
+        [sys.executable, "-m", "kesto", cmd, *args],
+        capture_output=True, text=True, cwd=cwd,
     )
 
 
@@ -224,10 +216,7 @@ def test_solve_agrees_with_the_file_route(tmp_path):
     assert direct.returncode == 0, direct.stderr[-2000:]
 
     assert _cli(os.path.join(FIXTURES, "board.png"), "-o", str(grid)).returncode == 0
-    viafile = subprocess.run(
-        [sys.executable, os.path.join(ROOT, "tools", "solve.py"), str(grid), "--mem-gb", "2"],
-        capture_output=True, text=True,
-    )
+    viafile = _cli(str(grid), "--mem-gb", "2", cmd="solve")
     assert viafile.returncode == 0, viafile.stderr[-2000:]
 
     def answer(out):

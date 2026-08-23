@@ -18,33 +18,25 @@ is cheap: some have tiny backward branching and huge forward branching, some the
 reverse, so committing to one direction in advance is what makes a board look
 unsolvable when it merely needed the other end.
 """
+
 from __future__ import annotations
 
 import argparse
 import os
-import sys
 
 import numpy as np
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
-sys.path.insert(0, ROOT)
-sys.path.insert(0, HERE)
-
-from meet import (
-    cap_memory,
+from ..grid import load_puzzle
+from .backward import predecessors
+from .engine import U64, cap_memory, log, vmove
+from .levels import (
     check_counts,
     clear_levels,
     expand,
     intersect_sorted,
-    log,
     mask_not_in,
     merge_sorted,
 )
-from probe import U64, vmove
-from vpred import predecessors
-
-from solver import load_puzzle
 
 def default_mem_gb():
     """Most of currently-available RAM, leaving the rest of the machine alone."""
@@ -238,10 +230,12 @@ def run(p, tag, mem_gb=None, out_dir=None, max_len=200):
     cap_memory(mem_gb if mem_gb is not None else default_mem_gb())
     check_counts(p)
 
-    # One fixed directory per board name, holding this run's scratch only.
+    # Scratch goes under the working directory, not the package: this is an
+    # installed library now, and a run's levels belong beside the board it was
+    # given. One fixed directory per board name, holding this run's scratch only.
     # Every run is a new board: anything already in there is a previous search's
     # leftovers, never resumed, so it goes before this one starts.
-    out_dir = out_dir or os.path.join(ROOT, "work", tag)
+    out_dir = out_dir or os.path.join(os.getcwd(), "work", tag)
     os.makedirs(out_dir, exist_ok=True)
     clear_levels(out_dir)
 
@@ -257,17 +251,14 @@ def run(p, tag, mem_gb=None, out_dir=None, max_len=200):
         discard_levels(out_dir)
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="kesto solve", description=__doc__.splitlines()[0])
     ap.add_argument("puzzle", help="grid file, bundled slug, or encoded string")
     ap.add_argument("--mem-gb", type=float, default=None, help="RLIMIT_AS ceiling")
     ap.add_argument("--dir", default=None, help="checkpoint directory")
     ap.add_argument("--max-len", type=int, default=200, help="give up beyond this length")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     tag = os.path.splitext(os.path.basename(args.puzzle))[0]
     return run(load_puzzle(args.puzzle), tag, args.mem_gb, args.dir, args.max_len)
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
