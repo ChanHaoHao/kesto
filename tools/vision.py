@@ -2,17 +2,17 @@
 """Read a Kesto board off a screenshot of the site.
 
 Usage:
+    python tools/vision.py board.png --solve
     python tools/vision.py board.png
     python tools/vision.py board.png -o board_today.txt
     python tools/vision.py board.png --debug
     python tools/vision.py board.png --vis steps/
 
 Emits the same grid text `solver.py` and everything in `tools/` already parse
-(`#` wall, `o` block, `.` goal, `*` block on goal, `-` empty), so the whole
-path from a screenshot to an optimal answer is:
-
-    python tools/vision.py board.png -o board_today.txt
-    python tools/solve.py board_today.txt
+(`#` wall, `o` block, `.` goal, `*` block on goal, `-` empty), so a screenshot
+drops into any of them. `--solve` hands the board it just read straight to
+`solve.py` instead, which is the whole daily in one command and needs no file
+in between.
 
 Why there is no real computer vision here
 -----------------------------------------
@@ -39,6 +39,7 @@ therefore scores whole cell footprints, never centre pixels.
 from __future__ import annotations
 
 import argparse
+import importlib
 import os
 import sys
 from typing import NamedTuple
@@ -47,6 +48,9 @@ import numpy as np
 from PIL import Image
 
 N = 8
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
 
 # --- classification thresholds -----------------------------------------------
 #
@@ -71,6 +75,19 @@ GUTTER_DIP = 0.5  # gutters fall to this fraction of the profile's cell plateau
 
 class BoardNotFound(Exception):
     """The image does not look like a board screenshot."""
+
+
+def _sibling(name):
+    """Import a tools/ or repo-root script on demand.
+
+    Those are scripts rather than a package, and both of the modules reached
+    this way are optional: `visualise` only when `--vis` is passed, `solve` only
+    when `--solve` is, which keeps a plain read off the numpy search stack.
+    """
+    for d in (HERE, ROOT):
+        if d not in sys.path:
+            sys.path.insert(0, d)
+    return importlib.import_module(name)
 
 
 class Profile(NamedTuple):
@@ -280,6 +297,13 @@ def main():
     ap.add_argument("-o", "--out", help="write the grid here instead of stdout")
     ap.add_argument("--debug", action="store_true", help="dump per-cell measurements")
     ap.add_argument(
+        "--solve", action="store_true", help="solve the board it read, via tools/solve.py"
+    )
+    ap.add_argument("--mem-gb", type=float, default=None, help="--solve: RLIMIT_AS ceiling")
+    ap.add_argument(
+        "--max-len", type=int, default=200, help="--solve: give up beyond this length"
+    )
+    ap.add_argument(
         "--vis",
         nargs="?",
         const="vis",
@@ -302,12 +326,9 @@ def main():
         err = e
 
     if args.vis:
-        # Drawing lives in a sibling module so the method above stays readable;
-        # it is imported only when the flag is passed, and nothing else uses it.
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from visualise import draw_steps
-
-        for path in draw_steps(rgb, a, args.vis):
+        # Drawing lives in a sibling module so the method above stays readable,
+        # and nothing else uses it.
+        for path in _sibling("visualise").draw_steps(rgb, a, args.vis):
             print(f"  {path}", file=sys.stderr)
     if args.debug and a is not None:
         debug_report(a)
@@ -319,7 +340,18 @@ def main():
         with open(args.out, "w") as fh:
             fh.write(a.text + "\n")
         print(f"wrote {args.out}", file=sys.stderr)
-    print(a.text)
+    # Flushed because `solve.run` logs its plies to stderr, which is unbuffered:
+    # without this the board turns up after the search that was run on it as
+    # soon as stdout is a pipe rather than a terminal.
+    print(a.text, flush=True)
+
+    if args.solve:
+        # `solve.run` owns the memory cap, the scratch directory and its
+        # cleanup, so the board goes to exactly the search `solve.py board.txt`
+        # would have run -- the file in between was the only thing dropped.
+        puzzle = _sibling("solver").parse_grid(a.text)
+        tag = os.path.splitext(os.path.basename(args.image))[0]
+        return _sibling("solve").run(puzzle, tag, args.mem_gb, max_len=args.max_len)
     return 0
 
 

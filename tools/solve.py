@@ -173,7 +173,7 @@ def descend(state, db, back, walls):
     return "".join(moves)
 
 
-def search(p, out_dir, args):
+def search(p, out_dir, max_len):
     """Run the bidirectional search. Returns the process exit code."""
     walls, popcnt = np.uint64(p.walls), p.n_blocks
 
@@ -185,7 +185,7 @@ def search(p, out_dir, args):
     back = Side("back", p.goals, lambda L, seen: predecessors(L, walls, popcnt, exclude=seen), out_dir)
 
     L = 1
-    while L <= args.max_len:
+    while L <= max_len:
         # Grow until L is decidable, always extending the cheaper frontier.
         while fwd.depth + back.depth < L:
             if fwd.exhausted and back.exhausted:
@@ -223,8 +223,38 @@ def search(p, out_dir, args):
         log(f"L={L}: no meet (fwd {fwd.depth} + back {back.depth})")
         L += 1
 
-    print(f"\nno solution up to {args.max_len} moves")
+    print(f"\nno solution up to {max_len} moves")
     return 2
+
+
+def run(p, tag, mem_gb=None, out_dir=None, max_len=200):
+    """Solve one puzzle under a memory cap, in scratch cleaned up either way.
+
+    The whole of `main` below the argument parsing, so a caller holding a
+    `Puzzle` -- `vision.py --solve`, with a board it just read off a screenshot
+    -- gets the same managed run rather than a second copy of the bookkeeping.
+    Returns the process exit code.
+    """
+    cap_memory(mem_gb if mem_gb is not None else default_mem_gb())
+    check_counts(p)
+
+    # One fixed directory per board name, holding this run's scratch only.
+    # Every run is a new board: anything already in there is a previous search's
+    # leftovers, never resumed, so it goes before this one starts.
+    out_dir = out_dir or os.path.join(ROOT, "work", tag)
+    os.makedirs(out_dir, exist_ok=True)
+    clear_levels(out_dir)
+
+    # And it goes again on the way out, however that happens -- solved,
+    # unsolvable, gave up, crashed, Ctrl-C. Nothing is kept for a later run
+    # because no later run would read it.
+    try:
+        return search(p, out_dir, max_len)
+    except KeyboardInterrupt:
+        print("\ninterrupted")
+        return 130
+    finally:
+        discard_levels(out_dir)
 
 
 def main():
@@ -235,30 +265,8 @@ def main():
     ap.add_argument("--max-len", type=int, default=200, help="give up beyond this length")
     args = ap.parse_args()
 
-    mem = args.mem_gb if args.mem_gb is not None else default_mem_gb()
-    cap_memory(mem)
-
-    p = load_puzzle(args.puzzle)
-    check_counts(p)
-
-    # One fixed directory per board name, holding this run's scratch only.
-    # Every run is a new board: anything already in there is a previous search's
-    # leftovers, never resumed, so it goes before this one starts.
     tag = os.path.splitext(os.path.basename(args.puzzle))[0]
-    out_dir = args.dir or os.path.join(ROOT, "work", tag)
-    os.makedirs(out_dir, exist_ok=True)
-    clear_levels(out_dir)
-
-    # And it goes again on the way out, however that happens -- solved,
-    # unsolvable, gave up, crashed, Ctrl-C. Nothing is kept for a later run
-    # because no later run would read it.
-    try:
-        return search(p, out_dir, args)
-    except KeyboardInterrupt:
-        print("\ninterrupted")
-        return 130
-    finally:
-        discard_levels(out_dir)
+    return run(load_puzzle(args.puzzle), tag, args.mem_gb, args.dir, args.max_len)
 
 
 if __name__ == "__main__":

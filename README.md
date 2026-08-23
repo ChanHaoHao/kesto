@@ -185,11 +185,12 @@ with its path replayed through `kesto.board` as a check. See
 [tools/README.md](tools/README.md) for the other three engines and the memory rules.
 
 If you have a screenshot of the board rather than a transcription, `tools/vision.py`
-reads one into the same grid format, and the whole daily is two commands:
+reads one into the same grid format, and `--solve` hands it straight to the search
+above — the whole daily in one command, with no file in between:
 
 ```bash
-uv run python tools/vision.py board.png -o board_today.txt
-uv run python tools/solve.py board_today.txt
+uv run python tools/vision.py board.png --solve
+uv run python tools/vision.py board.png -o board_today.txt   # or just the grid
 ```
 
 There is no real computer vision in it — the site draws flat fills on an exact

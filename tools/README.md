@@ -13,8 +13,8 @@ it takes a screenshot and writes one of those grid files.
 ## Start here
 
 ```bash
-.venv/bin/python tools/vision.py board.png -o board_today.txt   # if you have a screenshot
-.venv/bin/python tools/solve.py board_today.txt
+.venv/bin/python tools/vision.py board.png --solve   # if you have a screenshot
+.venv/bin/python tools/solve.py board_today.txt      # if you transcribed one
 ```
 
 `solve.py` is the one you want in almost every case. It picks depths and
@@ -32,9 +32,10 @@ The other three are the layers underneath it, usable on their own:
 | a simpler one-shot bidirectional search | `meet.py` |
 | see the backward levels alone | `vpred.py` |
 
-`vision.py` stands apart from the rest and imports none of them; it is a way
-into the grid format, not a search. `visualise.py` is its `--vis` drawing half
-and nothing else imports it. The dependency order of the other four is
+`vision.py` is a way into the grid format rather than a search of its own; it
+reaches `solve.py` only for `--solve`, and `visualise.py`, its drawing half,
+only for `--vis`. Both imports are made on demand, so a plain read stays off the
+numpy search stack. Nothing imports `vision.py` back. The dependency order of the other four is
 `probe.py` → `vpred.py` → `meet.py` → `solve.py`:
 `probe.py` is the leaf, owning the vectorised forward engine `vmove` plus
 `cap_memory`/`log`/`rss_gb`; `vpred.py` owns `predecessors`; `meet.py` owns the
@@ -77,6 +78,7 @@ ply exceeds RAM can't be finished this way.
 ## vision.py — screenshot to grid
 
 ```bash
+.venv/bin/python tools/vision.py board.png --solve
 .venv/bin/python tools/vision.py board.png
 .venv/bin/python tools/vision.py board.png -o board_today.txt
 .venv/bin/python tools/vision.py board.png --debug
@@ -85,6 +87,13 @@ ply exceeds RAM can't be finished this way.
 
 Prints the board in the charset every other entry point reads, so transcribing
 the daily puzzle by hand is optional.
+
+`--solve` hands that board straight to `solve.py` and skips the file entirely,
+which is the whole daily in one command. It is the same search either way:
+`solve.run` owns the memory cap, the scratch directory and its cleanup, and
+`--solve` calls it rather than carrying a second copy of that bookkeeping, so
+`--mem-gb` and `--max-len` mean here exactly what they mean there. A read that
+was rejected never reaches the solver.
 
 There is deliberately no computer vision in it. The site draws the board to a
 canvas as flat fills on an exact pixel grid: a real capture holds 220 distinct
@@ -221,7 +230,9 @@ site's palette. That covers what one screenshot cannot: `*` cells, wall-free
 boards, every block count from 4 to 11, and the resampled and JPEG-recompressed
 captures that first exposed the gutter threshold as too strict. `--vis` is
 covered too -- that it draws every stage on a good image, only the stages it
-reached on a rejected one, and that it stays a side effect of a normal read.
+reached on a rejected one, and that it stays a side effect of a normal read --
+and `--solve` is pinned against the answer the file route gives for the same
+screenshot, so the two cannot drift apart.
 
 A board whose block count differs from its goal count is rejected up front by
 every entry point — the count is invariant under a swipe, so such a board cannot

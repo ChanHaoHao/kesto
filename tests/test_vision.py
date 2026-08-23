@@ -195,3 +195,58 @@ def test_vis_flag_still_prints_the_board(tmp_path):
     assert proc.returncode == 0
     assert proc.stdout.strip() == REAL_BOARD
     assert _drawn(out) == STAGES
+
+
+# --- --solve -------------------------------------------------------------------
+
+
+def _cli(*args):
+    """Run vision.py as the user does. Subprocess because --solve caps RLIMIT_AS."""
+    return subprocess.run(
+        [sys.executable, os.path.join(ROOT, "tools", "vision.py"), *args],
+        capture_output=True, text=True,
+    )
+
+
+def test_solve_reaches_the_optimum():
+    """A screenshot straight to an answer, with no grid file in between."""
+    proc = _cli(os.path.join(FIXTURES, "board.png"), "--solve", "--mem-gb", "2",
+                "--max-len", "40")
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert "OPTIMAL: 23 moves" in proc.stdout
+    assert "verify : OK" in proc.stdout
+
+
+def test_solve_agrees_with_the_file_route(tmp_path):
+    """--solve must be the same search, not a second implementation of it."""
+    grid = tmp_path / "board.txt"
+    direct = _cli(os.path.join(FIXTURES, "board.png"), "--solve", "--mem-gb", "2")
+    assert direct.returncode == 0, direct.stderr[-2000:]
+
+    assert _cli(os.path.join(FIXTURES, "board.png"), "-o", str(grid)).returncode == 0
+    viafile = subprocess.run(
+        [sys.executable, os.path.join(ROOT, "tools", "solve.py"), str(grid), "--mem-gb", "2"],
+        capture_output=True, text=True,
+    )
+    assert viafile.returncode == 0, viafile.stderr[-2000:]
+
+    def answer(out):
+        return [ln for ln in out.splitlines() if ln.startswith(("OPTIMAL", "path"))]
+
+    assert answer(direct.stdout) == answer(viafile.stdout)
+
+
+def test_solve_prints_the_board_before_solving_it():
+    """stdout is block-buffered off a terminal; the board must not arrive late."""
+    proc = _cli(os.path.join(FIXTURES, "board.png"), "--solve", "--mem-gb", "2")
+    assert proc.stdout.index(REAL_BOARD) < proc.stdout.index("OPTIMAL")
+
+
+def test_solve_refuses_an_unreadable_image(tmp_path):
+    """A rejected read must not reach the solver."""
+    path = tmp_path / "blank.png"
+    Image.new("RGB", (400, 400), (200, 200, 200)).save(path)
+    proc = _cli(str(path), "--solve")
+    assert proc.returncode == 1
+    assert "gutters" in proc.stderr
+    assert "OPTIMAL" not in proc.stdout
